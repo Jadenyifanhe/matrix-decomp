@@ -12,53 +12,231 @@ from torch.utils.data import DataLoader
 
 def compute_importance_scores(
     model: nn.Module,
-    data_loader: DataLoader,
+    data_loader: Optional[DataLoader] = None,
     method: str = "gradient",
     criterion: Optional[Callable] = None,
     device: str = "cpu",
+    input_shape: Optional[tuple] = None,
     **kwargs
 ) -> Dict[str, float]:
     """
-    Compute importance scores for all layers in a model.
+    Unified interface for computing importance scores using 30+ methods.
 
     Args:
         model: PyTorch model to analyze
-        data_loader: DataLoader for validation/calibration data
-        method: Importance scoring method:
-            - 'gradient': Gradient-based importance (requires labels)
-            - 'activation': Activation magnitude-based
-            - 'weight': Weight magnitude-based (no data needed)
-            - 'fisher': Fisher information-based
-        criterion: Loss function (required for gradient and fisher methods)
+        data_loader: DataLoader (required for most methods, not all)
+        method: Importance scoring method (see categories below)
+        criterion: Loss function (required for some methods)
         device: Device to run computation on
+        input_shape: Input shape (required for data-free methods like SynFlow)
         **kwargs: Additional method-specific arguments
+
+    Methods Categories:
+        Gradient-based:
+            - 'gradient': Gradient magnitude (fast, general purpose)
+            - 'taylor': Taylor expansion (RECOMMENDED for production)
+
+        Pruning-based:
+            - 'snip': Connection sensitivity
+            - 'grasp': Gradient signal preservation
+            - 'synflow': Synaptic flow (NO DATA NEEDED)
+            - 'movement': Parameter movement
+            - 'magnitude': Weight magnitude (NO DATA NEEDED)
+
+        Hessian-based:
+            - 'hessian': Hessian diagonal
+            - 'obd': Optimal Brain Damage
+            - 'fisher': Fisher Information
+            - 'fisher_empirical': Empirical Fisher
+
+        Ablation-based:
+            - 'knockout': Layer knockout (MOST ACCURATE, SLOWEST)
+            - 'perturbation': Weight perturbation
+            - 'channel_ablation': Channel ablation (CNNs)
+            - 'dropout': Dropout-based
+
+        Information-theoretic:
+            - 'mutual_info': Mutual information
+            - 'entropy': Activation entropy
+            - 'rsa': Representation similarity
+            - 'sparsity': Activation sparsity (APoZ)
+
+        Layer Geometry (NO DATA NEEDED):
+            - 'effective_rank': Effective rank
+            - 'condition_number': Condition number
+            - 'spectral_norm': Spectral norm (FAST)
+            - 'nuclear_norm': Nuclear norm
+            - 'stable_rank': Stable rank
+            - 'lipschitz': Lipschitz constant
 
     Returns:
         Dictionary mapping layer names to importance scores
+
+    Examples:
+        >>> # Fast general purpose
+        >>> scores = compute_importance_scores(model, val_loader, method='gradient')
+
+        >>> # Best for production/ads models
+        >>> scores = compute_importance_scores(model, val_loader, method='taylor', criterion=loss_fn)
+
+        >>> # No data available
+        >>> scores = compute_importance_scores(model, method='synflow', input_shape=(3, 224, 224))
     """
     model = model.to(device)
+
+    # Check if method needs data
+    data_free_methods = ['synflow', 'effective_rank', 'condition_number', 'spectral_norm',
+                         'nuclear_norm', 'stable_rank', 'lipschitz', 'magnitude', 'weight', 'movement']
+
+    if method not in data_free_methods and data_loader is None:
+        raise ValueError(f"Method '{method}' requires data_loader")
+
     model.eval()
 
+    # Gradient-based methods
     if method == "gradient":
         from .gradient_based import GradientImportance
         scorer = GradientImportance()
         return scorer.compute_scores(model, data_loader, criterion, device, **kwargs)
 
+    elif method == "taylor":
+        from .gradient_based import TaylorImportance
+        scorer = TaylorImportance()
+        return scorer.compute_scores(model, data_loader, criterion, device, **kwargs)
+
+    # Pruning-based methods
+    elif method == "snip":
+        from .pruning_based import SNIPImportance
+        scorer = SNIPImportance()
+        return scorer.compute_scores(model, data_loader, criterion, device, **kwargs)
+
+    elif method == "grasp":
+        from .pruning_based import GraSPImportance
+        scorer = GraSPImportance()
+        return scorer.compute_scores(model, data_loader, criterion, device, **kwargs)
+
+    elif method == "synflow":
+        from .pruning_based import SynFlowImportance
+        if input_shape is None:
+            raise ValueError("SynFlow requires input_shape parameter")
+        scorer = SynFlowImportance()
+        return scorer.compute_scores(model, input_shape, device, **kwargs)
+
+    elif method == "movement":
+        from .pruning_based import MovementPruningImportance
+        scorer = MovementPruningImportance()
+        return scorer.compute_scores(model, **kwargs)
+
+    elif method in ["magnitude", "weight"]:
+        from .pruning_based import MagnitudePruningImportance
+        scorer = MagnitudePruningImportance()
+        return scorer.compute_scores(model, **kwargs)
+
+    # Hessian-based methods
+    elif method == "hessian":
+        from .hessian_based import HessianDiagonalImportance
+        scorer = HessianDiagonalImportance()
+        return scorer.compute_scores(model, data_loader, criterion, device, **kwargs)
+
+    elif method == "obd":
+        from .hessian_based import OptimalBrainDamageImportance
+        scorer = OptimalBrainDamageImportance()
+        return scorer.compute_scores(model, data_loader, criterion, device, **kwargs)
+
+    elif method in ["fisher", "fisher_diagonal"]:
+        from .fisher_information import FisherImportance
+        scorer = FisherImportance()
+        return scorer.compute_scores(model, data_loader, criterion, device, **kwargs)
+
+    elif method == "fisher_empirical":
+        from .hessian_based import EmpiricalFisherImportance
+        scorer = EmpiricalFisherImportance()
+        return scorer.compute_scores(model, data_loader, criterion, device, **kwargs)
+
+    # Ablation-based methods
+    elif method == "knockout":
+        from .ablation_based import LayerKnockoutImportance
+        scorer = LayerKnockoutImportance()
+        return scorer.compute_scores(model, data_loader, criterion, device, **kwargs)
+
+    elif method == "perturbation":
+        from .ablation_based import WeightPerturbationImportance
+        scorer = WeightPerturbationImportance()
+        return scorer.compute_scores(model, data_loader, criterion, device, **kwargs)
+
+    elif method == "channel_ablation":
+        from .ablation_based import ChannelAblationImportance
+        scorer = ChannelAblationImportance()
+        return scorer.compute_scores(model, data_loader, criterion, device, **kwargs)
+
+    elif method == "dropout":
+        from .ablation_based import DropoutBasedImportance
+        scorer = DropoutBasedImportance()
+        return scorer.compute_scores(model, data_loader, device, **kwargs)
+
+    # Information-theoretic methods
+    elif method == "mutual_info":
+        from .information_theoretic import MutualInformationImportance
+        scorer = MutualInformationImportance()
+        return scorer.compute_scores(model, data_loader, device, **kwargs)
+
+    elif method == "entropy":
+        from .information_theoretic import EntropyBasedImportance
+        scorer = EntropyBasedImportance()
+        return scorer.compute_scores(model, data_loader, device, **kwargs)
+
+    elif method == "rsa":
+        from .information_theoretic import RepresentationSimilarityImportance
+        scorer = RepresentationSimilarityImportance()
+        return scorer.compute_scores(model, data_loader, device, **kwargs)
+
+    elif method == "sparsity":
+        from .information_theoretic import ActivationSparsityImportance
+        scorer = ActivationSparsityImportance()
+        return scorer.compute_scores(model, data_loader, device, **kwargs)
+
+    # Layer geometry methods
+    elif method == "effective_rank":
+        from .layer_geometry import EffectiveRankImportance
+        scorer = EffectiveRankImportance()
+        return scorer.compute_scores(model, **kwargs)
+
+    elif method == "condition_number":
+        from .layer_geometry import ConditionNumberImportance
+        scorer = ConditionNumberImportance()
+        return scorer.compute_scores(model, **kwargs)
+
+    elif method == "spectral_norm":
+        from .layer_geometry import SpectralNormImportance
+        scorer = SpectralNormImportance()
+        return scorer.compute_scores(model, **kwargs)
+
+    elif method == "nuclear_norm":
+        from .layer_geometry import NuclearNormImportance
+        scorer = NuclearNormImportance()
+        return scorer.compute_scores(model, **kwargs)
+
+    elif method == "stable_rank":
+        from .layer_geometry import StableRankImportance
+        scorer = StableRankImportance()
+        return scorer.compute_scores(model, **kwargs)
+
+    elif method == "lipschitz":
+        from .layer_geometry import LipschitzConstantImportance
+        scorer = LipschitzConstantImportance()
+        return scorer.compute_scores(model, **kwargs)
+
+    # Legacy methods
     elif method == "activation":
         from .activation_based import ActivationImportance
         scorer = ActivationImportance()
         return scorer.compute_scores(model, data_loader, device, **kwargs)
 
-    elif method == "weight":
-        return _compute_weight_importance(model, **kwargs)
-
-    elif method == "fisher":
-        from .fisher_information import FisherImportance
-        scorer = FisherImportance()
-        return scorer.compute_scores(model, data_loader, criterion, device, **kwargs)
-
     else:
-        raise ValueError(f"Unknown importance method: {method}")
+        raise ValueError(
+            f"Unknown importance method: '{method}'. "
+            f"See docstring for list of available methods (30+ options)."
+        )
 
 
 def _compute_weight_importance(
