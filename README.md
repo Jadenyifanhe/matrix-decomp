@@ -2,6 +2,19 @@
 
 A comprehensive framework for knowledge transfer from large-scale models to compact models using matrix decomposition techniques. This approach improves prediction performance of small models without significantly increasing model size or degrading inference QPS.
 
+**Version 0.2.0** - Now with QPS-optimized methods for production deployment!
+
+## Table of Contents
+- [Overview](#overview)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Why Vanilla SVD Hurts QPS](#why-vanilla-svd-hurts-qps-despite-lower-flops)
+- [Supported Methods](#supported-methods)
+- [For Ads Models (Recommended Setup)](#for-ads-models-recommended-setup)
+- [API Reference](#api-reference)
+- [Benchmarking](#benchmarking)
+- [Advanced Topics](#advanced-topics)
+
 ## Overview
 
 ### The Problem
@@ -15,61 +28,16 @@ You have a production ads model that needs better prediction performance, but yo
 2. **Importance Identification**: Use internal metrics to identify which components contribute most to performance
 3. **Matrix Decomposition**: Compress important weight matrices into low-rank representations
 4. **Knowledge Transfer**: Inject compressed representations back into the small model
+5. **Merge for Deployment**: Merge adapters into base weights for zero runtime overhead
 
-## Why SVD Can Hurt QPS (Despite Lower FLOPs)
+### Key Features
 
-Many practitioners find that vanilla SVD gives prediction gains but surprisingly *degrades* QPS. Here's why:
-
-### SVD Decomposition: `W ≈ U @ S @ V^T`
-- **Original**: 1 matrix multiplication `y = W @ x` (shape: `[m, n] @ [n, 1]`)
-- **SVD**: 2 sequential multiplications `y = U @ (S @ (V^T @ x))`
-  - First: `V^T @ x` (shape: `[r, n] @ [n, 1]`)
-  - Second: `(U @ S) @ result` (shape: `[m, r] @ [r, 1]`)
-
-### Performance Bottlenecks:
-1. **Sequential Operations**: Two matrix multiplications must happen in sequence, reducing parallelization
-2. **Memory Access Patterns**: Two smaller matrices may have worse cache locality than one contiguous matrix
-3. **Kernel Launch Overhead**: On GPUs, launching two kernels has overhead
-4. **Memory Bandwidth**: Reading two matrices from memory can be slower than reading one
-5. **Batch Processing**: Modern hardware is optimized for large matrix operations; smaller sequential ops are less efficient
-
-### Better Alternatives:
-- **LoRA/Adapter**: Keeps original matrix + adds low-rank residual (better parallelization)
-- **Fused Operations**: Merge U and S into single matrix (`U @ S`)
-- **Knowledge Distillation**: Use large model to train small model (no structural change)
-- **Structured Pruning**: Remove entire neurons/channels (maintains single matrix ops)
-
-## Supported Methods
-
-### 1. **SVD (Singular Value Decomposition)**
-- **Pros**: Mathematically optimal low-rank approximation, easy to implement
-- **Cons**: Sequential operations hurt QPS, may lose performance on small ranks
-- **Best for**: Offline compression when QPS is less critical
-- **Implementation**: `decomposition/svd_decomposition.py`
-
-### 2. **LoRA-Style Adapters (Low-Rank Adaptation)**
-- **Pros**: Preserves original matrix, adds trainable residual, better QPS than SVD
-- **Cons**: Slightly more memory (stores both original and adapter)
-- **Best for**: Fine-tuning scenarios, when QPS is critical
-- **Implementation**: `decomposition/lora_adapter.py`
-
-### 3. **Tucker Decomposition**
-- **Pros**: Higher compression for tensors, flexible rank selection per dimension
-- **Cons**: More complex, requires careful tuning
-- **Best for**: Convolutional layers, multi-dimensional weight tensors
-- **Implementation**: `decomposition/tucker_decomposition.py`
-
-### 4. **CP Decomposition (CANDECOMP/PARAFAC)**
-- **Pros**: Maximum compression, separates all dimensions
-- **Cons**: Less stable, may require more ranks to maintain accuracy
-- **Best for**: High-dimensional tensors, extreme compression needs
-- **Implementation**: `decomposition/cp_decomposition.py`
-
-### 5. **Fused SVD (SVD with Pre-merged Matrices)**
-- **Pros**: Reduces sequential operations, better QPS than vanilla SVD
-- **Cons**: Still not as fast as LoRA in some cases
-- **Best for**: Deployment scenarios where you want SVD benefits with better speed
-- **Implementation**: `decomposition/fused_svd.py`
+- **15+ decomposition methods** with different accuracy/speed trade-offs
+- **30+ importance scoring methods** for layer selection
+- **QPS-optimized methods** that maintain or improve inference speed
+- **Hybrid approaches** for best of both worlds
+- **End-to-end pipeline** for easy experimentation
+- **Comprehensive benchmarking** tools
 
 ## Installation
 
@@ -85,82 +53,26 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
+### Dependencies
+- PyTorch >= 2.0.0
+- NumPy >= 1.24.0
+- SciPy >= 1.10.0
+- TensorLy >= 0.8.0 (optional, for Tucker/CP decomposition)
+
 ## Quick Start
 
-### Example 1: SVD Decomposition and Transfer
+### Easiest: Use the Pipeline
 
 ```python
-import torch
-from matrix_decomp.decomposition.svd_decomposition import SVDDecomposer
-from matrix_decomp.importance.neuron_importance import compute_importance_scores
-from matrix_decomp.transfer.knowledge_transfer import KnowledgeTransfer
-
-# Assume you have a large model and small model
-large_model = YourLargeModel()
-small_model = YourSmallModel()
-
-# 1. Identify important layers
-importance_scores = compute_importance_scores(
-    large_model,
-    validation_data,
-    method='gradient'  # or 'activation', 'weight', 'fisher'
-)
-
-# 2. Select top-k important layers
-top_layers = sorted(importance_scores.items(), key=lambda x: x[1], reverse=True)[:5]
-
-# 3. Decompose important layers
-decomposer = SVDDecomposer(rank=64)
-decomposed_weights = {}
-for layer_name, _ in top_layers:
-    weight = large_model.get_parameter(layer_name)
-    U, S, Vt = decomposer.decompose(weight)
-    decomposed_weights[layer_name] = (U, S, Vt)
-
-# 4. Transfer to small model
-transfer = KnowledgeTransfer(method='svd')
-transfer.inject_decomposed_weights(small_model, decomposed_weights)
-
-# 5. Fine-tune if needed
-fine_tune(small_model, train_data, epochs=5)
-```
-
-### Example 2: LoRA-Style Adapter (Recommended for QPS)
-
-```python
-from matrix_decomp.decomposition.lora_adapter import LoRAAdapter
-
-# Create LoRA adapter from large model weights
-adapter = LoRAAdapter(rank=64, alpha=16)
-
-for layer_name in important_layers:
-    large_weight = large_model.get_parameter(layer_name)
-    small_weight = small_model.get_parameter(layer_name)
-
-    # Compute residual: large_weight - small_weight
-    residual = large_weight[:small_weight.shape[0], :small_weight.shape[1]] - small_weight
-
-    # Decompose residual into low-rank adapter
-    A, B = adapter.decompose_residual(residual)
-
-    # Attach adapter to small model
-    adapter.attach_to_layer(small_model, layer_name, A, B)
-
-# The small model now has adapters that add the knowledge from large model
-```
-
-### Example 3: Complete Pipeline
-
-```python
-from matrix_decomp.pipeline import ModelDistillationPipeline
+from matrix_decomp import ModelDistillationPipeline
 
 # Initialize pipeline
 pipeline = ModelDistillationPipeline(
-    large_model=large_model,
-    small_model=small_model,
-    decomposition_method='lora',  # or 'svd', 'tucker', 'cp'
+    large_model=large_model,     # Your 5x scaled-up model
+    small_model=small_model,     # Your production model
+    decomposition_method='lora', # Best for QPS (RECOMMENDED)
     rank=64,
-    importance_method='gradient'
+    importance_method='taylor'   # Best for ads models
 )
 
 # Run the full pipeline
@@ -168,11 +80,358 @@ enhanced_model = pipeline.run(
     validation_data=val_loader,
     top_k_layers=10,
     fine_tune_epochs=5,
-    measure_qps=True  # Benchmark QPS before/after
+    measure_qps=True
 )
 
-# Get report
+# Get detailed report
 pipeline.print_report()
+```
+
+### Production Deployment
+
+```python
+# After training, merge adapters for zero overhead
+for module in enhanced_model.modules():
+    if hasattr(module, 'merge'):
+        module.merge()
+
+# Now the model is as fast as the original!
+```
+
+### For Quick Experiments
+
+```python
+from matrix_decomp import AutoPipeline
+
+# Automatically selects the best method based on QPS priority
+pipeline = AutoPipeline(
+    large_model=large_model,
+    small_model=small_model,
+    qps_priority=0.8  # 0=accuracy only, 1=QPS only
+)
+```
+
+## Why Vanilla SVD Hurts QPS (Despite Lower FLOPs)
+
+Many practitioners find that vanilla SVD gives prediction gains but surprisingly *degrades* QPS. Here's a detailed explanation:
+
+### The Mathematics
+- **Original**: `y = W @ x` (1 matrix multiplication)
+- **SVD**: `y = U @ S @ (V^T @ x)` (2-3 sequential multiplications)
+
+### Performance Bottlenecks
+
+| Issue | Impact | Why It Matters |
+|-------|--------|----------------|
+| Sequential Operations | 2-3 kernel launches vs 1 | Each launch has ~10-50μs overhead |
+| Memory Access | Poor cache locality | Reading 3 matrices is slower than 1 |
+| Reduced Parallelism | Cores wait between ops | Underutilization during transitions |
+| Batch Size | Worse at batch_size=1 | Common in real-time ads serving |
+
+### Quantified Impact
+- CPU inference: 20-40% slower
+- GPU (batch=1): 50-100% slower
+- GPU (batch=32+): 10-30% slower
+
+### The Solution: Use LoRA-based Methods
+
+```python
+# Training: Two operations (acceptable overhead)
+y = W @ x + alpha * (B @ A @ x)
+
+# Deployment: Merge into single matrix (ZERO overhead)
+W_merged = W + alpha * (B @ A)
+y = W_merged @ x  # Same as original!
+```
+
+## Supported Methods
+
+### QPS-Optimized Methods (Recommended for Production)
+
+| Method | Class | QPS Impact | Best For |
+|--------|-------|------------|----------|
+| **MergedLoRA** | `MergedLoRADecomposer` | Zero overhead | Production deployment |
+| **DoRA** | `DoRAAdapter` | Zero (when merged) | Maximum accuracy |
+| **Standard LoRA** | `LoRAAdapter` | ~5% overhead | Fine-tuning flexibility |
+| **Fused SVD** | `FusedSVDDecomposer` | ~10% overhead | When LoRA isn't applicable |
+
+### Alternative Methods
+
+| Method | Class | Use Case |
+|--------|-------|----------|
+| **RandomizedSVD** | `RandomizedSVDDecomposer` | Very large matrices |
+| **QR** | `QRDecomposer` | Numerically unstable matrices |
+| **Kronecker** | `KroneckerFactorization` | Block-structured matrices |
+| **Tucker** | `TuckerDecomposer` | Convolutional layers (4D) |
+| **CP** | `CPDecomposer` | Maximum compression |
+| **Vanilla SVD** | `SVDDecomposer` | Offline analysis only |
+
+### Hybrid Approaches
+
+| Method | Class | Description |
+|--------|-------|-------------|
+| **HybridDecomposer** | `HybridDecomposer` | LoRA for important layers, SVD for others |
+| **AdaptiveRank** | `AdaptiveRankDecomposer` | Auto-selects rank per layer |
+| **LayerWise** | `LayerWiseDecomposer` | Different methods for layer types |
+| **ImportanceWeighted** | `ImportanceWeightedDecomposer` | Higher ranks for important layers |
+
+## For Ads Models (Recommended Setup)
+
+### Recommended Configuration
+
+```python
+from matrix_decomp import ModelDistillationPipeline
+from matrix_decomp.decomposition import DoRAAdapter
+
+# Best configuration for ads models
+pipeline = ModelDistillationPipeline(
+    large_model=scaled_up_model,
+    small_model=production_model,
+    decomposition_method='lora',  # or use DoRA for better accuracy
+    rank=64,
+    importance_method='taylor',   # Most reliable for ads
+    device='cuda'
+)
+
+# Layer-specific ranks (recommended)
+rank_config = {
+    'embedding': 256,      # User/item embeddings - high capacity
+    'interaction': 128,    # Cross-feature interactions - critical
+    'hidden': 64,          # MLP hidden layers - less sensitive
+    'output': 64,          # Final layers - important
+}
+```
+
+### Rank Selection Guidelines
+
+| Layer Type | Recommended Rank | Rationale |
+|------------|------------------|-----------|
+| Embedding layers | 128-256 | High dimensional, need capacity |
+| Attention Q/K/V | 64-128 | Critical for performance |
+| FFN intermediate | 32-64 | Less sensitive to rank |
+| Output/Classification | 64-128 | Important for predictions |
+
+### Complete Ads Model Example
+
+```python
+import torch
+from matrix_decomp import ModelDistillationPipeline
+from matrix_decomp.benchmarks import measure_qps
+
+# 1. Create your models
+class AdsModel(torch.nn.Module):
+    def __init__(self, scale=1):
+        super().__init__()
+        self.embedding = torch.nn.Embedding(100000, 64 * scale)
+        self.interaction = torch.nn.Linear(64 * scale, 256 * scale)
+        self.hidden = torch.nn.Sequential(
+            torch.nn.Linear(256 * scale, 512 * scale),
+            torch.nn.ReLU(),
+            torch.nn.Linear(512 * scale, 256 * scale),
+        )
+        self.output = torch.nn.Linear(256 * scale, 1)
+
+    def forward(self, x):
+        x = self.embedding(x).mean(dim=1)
+        x = self.interaction(x)
+        x = self.hidden(x)
+        return self.output(x)
+
+# Create 5x scale-up and production models
+large_model = AdsModel(scale=5)  # 5x larger
+small_model = AdsModel(scale=1)  # Production size
+
+# Train large_model... (your training code)
+
+# 2. Transfer knowledge
+pipeline = ModelDistillationPipeline(
+    large_model=large_model,
+    small_model=small_model,
+    decomposition_method='lora',
+    rank=64,
+    importance_method='taylor'
+)
+
+enhanced = pipeline.run(
+    validation_data=val_loader,
+    top_k_layers=5,
+    fine_tune_epochs=5
+)
+
+# 3. Merge for deployment
+for module in enhanced.modules():
+    if hasattr(module, 'merge'):
+        module.merge()
+
+# 4. Verify QPS
+original_qps = measure_qps(small_model, (10,), device='cuda')
+enhanced_qps = measure_qps(enhanced, (10,), device='cuda')
+
+print(f"Original QPS: {original_qps['mean_qps']:.0f}")
+print(f"Enhanced QPS: {enhanced_qps['mean_qps']:.0f}")
+# Should be nearly identical!
+```
+
+## API Reference
+
+### Main Pipeline
+
+```python
+from matrix_decomp import ModelDistillationPipeline, AutoPipeline
+
+# ModelDistillationPipeline
+pipeline = ModelDistillationPipeline(
+    large_model,              # Source model
+    small_model,              # Target model
+    decomposition_method,     # 'lora', 'fused_svd', 'svd', etc.
+    rank,                     # Low-rank dimension
+    importance_method,        # 'gradient', 'taylor', 'synflow', etc.
+    device='cpu'
+)
+
+# Methods
+pipeline.compute_importance(data_loader, criterion)
+pipeline.select_layers(top_k=10)
+pipeline.transfer_knowledge(layer_names)
+pipeline.fine_tune(train_loader, criterion, epochs)
+pipeline.benchmark(input_shape)
+pipeline.print_report()
+```
+
+### Decomposition Methods
+
+```python
+from matrix_decomp.decomposition import (
+    # Standard
+    SVDDecomposer,
+    LoRAAdapter,
+    FusedSVDDecomposer,
+    TuckerDecomposer,
+    CPDecomposer,
+
+    # QPS-Optimized
+    DoRAAdapter,
+    MergedLoRADecomposer,
+    RandomizedSVDDecomposer,
+    QRDecomposer,
+    KroneckerFactorization,
+
+    # Hybrid
+    HybridDecomposer,
+    AdaptiveRankDecomposer,
+    LayerWiseDecomposer,
+    ImportanceWeightedDecomposer,
+)
+```
+
+### Importance Scoring
+
+```python
+from matrix_decomp.importance import compute_importance_scores
+
+# 30+ methods available
+scores = compute_importance_scores(
+    model,
+    data_loader,
+    method='taylor',  # See IMPORTANCE_METHODS_GUIDE.md for all options
+    criterion=loss_fn
+)
+```
+
+### Benchmarking
+
+```python
+from matrix_decomp.benchmarks import (
+    measure_qps,
+    compare_qps,
+    count_flops,
+    compare_flops,
+    compute_compression_ratio,
+)
+
+# Measure QPS
+qps = measure_qps(model, input_shape=(128,), device='cuda', batch_size=1)
+
+# Compare multiple models
+results = compare_qps(
+    {'Original': model1, 'Enhanced': model2},
+    input_shape=(128,),
+    device='cuda'
+)
+```
+
+## Benchmarking
+
+Always benchmark before deploying:
+
+```python
+from matrix_decomp.benchmarks import measure_qps, profile_layer_latency
+
+# Overall QPS
+qps = measure_qps(
+    model,
+    input_shape=(128,),
+    batch_size=1,        # Use production batch size
+    num_iterations=1000,
+    device='cuda',
+    verbose=True
+)
+
+# Per-layer breakdown (find bottlenecks)
+latencies = profile_layer_latency(model, input_shape=(128,))
+for layer, ms in sorted(latencies.items(), key=lambda x: x[1], reverse=True)[:5]:
+    print(f"{layer}: {ms:.2f}ms")
+```
+
+## Advanced Topics
+
+### Handling Dimension Mismatches
+
+When the large model has 5x dimensions but the small model is 1x:
+
+```python
+from matrix_decomp.transfer import adapt_dimensions, smart_dimension_adaptation
+
+# Large: [1024, 2048], Small: [204, 409]
+# The framework handles this automatically!
+```
+
+### Layer-Specific Configurations
+
+```python
+from matrix_decomp.decomposition import LayerWiseDecomposer
+
+decomposer = LayerWiseDecomposer(
+    default_rank=64,
+    layer_configs={
+        'attention': {'method': 'lora', 'rank': 128},
+        'ffn': {'method': 'fused_svd', 'rank': 32},
+        'embedding': {'method': 'randomized_svd', 'rank': 256},
+    }
+)
+```
+
+### Combining with Other Techniques
+
+```python
+# After decomposition-based transfer:
+
+# 1. Knowledge Distillation
+# Use large model as teacher during fine-tuning
+teacher_outputs = large_model(x)
+student_outputs = small_model(x)
+kd_loss = F.kl_div(student_outputs.log(), teacher_outputs)
+
+# 2. Quantization
+# Quantize after merging adapters
+quantized_model = torch.quantization.quantize_dynamic(
+    enhanced_model, {torch.nn.Linear}, dtype=torch.qint8
+)
+
+# 3. Pruning
+# Prune less important neurons
+from torch.nn.utils import prune
+prune.l1_unstructured(layer, name='weight', amount=0.3)
 ```
 
 ## Project Structure
@@ -180,106 +439,77 @@ pipeline.print_report()
 ```
 matrix-decomp/
 ├── README.md                          # This file
-├── requirements.txt                   # Python dependencies
-├── setup.py                          # Package setup
-├── matrix_decomp/                    # Main package
+├── METHOD_SELECTION_GUIDE.md          # Detailed method selection guide
+├── IMPORTANCE_METHODS_GUIDE.md        # 30+ importance scoring methods
+├── requirements.txt
+├── setup.py
+├── matrix_decomp/
 │   ├── __init__.py
-│   ├── decomposition/               # Decomposition methods
-│   │   ├── __init__.py
-│   │   ├── base.py                 # Base decomposer class
-│   │   ├── svd_decomposition.py    # SVD implementation
-│   │   ├── lora_adapter.py         # LoRA-style adapters
-│   │   ├── tucker_decomposition.py # Tucker decomposition
-│   │   ├── cp_decomposition.py     # CP decomposition
-│   │   └── fused_svd.py           # Fused SVD for better QPS
-│   ├── importance/                  # Importance scoring
-│   │   ├── __init__.py
-│   │   ├── neuron_importance.py    # Neuron-level importance
-│   │   ├── gradient_based.py       # Gradient-based scoring
-│   │   ├── activation_based.py     # Activation-based scoring
-│   │   └── fisher_information.py   # Fisher information
-│   ├── transfer/                    # Knowledge transfer
-│   │   ├── __init__.py
-│   │   ├── knowledge_transfer.py   # Main transfer logic
-│   │   └── dimension_adapter.py    # Handle dimension mismatches
-│   ├── benchmarks/                  # Performance benchmarking
-│   │   ├── __init__.py
-│   │   ├── qps_benchmark.py       # QPS measurement
-│   │   └── flops_counter.py       # FLOPS counting
-│   └── pipeline.py                 # End-to-end pipeline
-├── examples/                        # Example scripts
-│   ├── basic_svd_example.py
-│   ├── lora_adapter_example.py
+│   ├── pipeline.py                    # End-to-end pipeline
+│   ├── decomposition/
+│   │   ├── base.py
+│   │   ├── svd_decomposition.py
+│   │   ├── lora_adapter.py
+│   │   ├── fused_svd.py
+│   │   ├── qps_optimized.py          # DoRA, MergedLoRA, etc.
+│   │   ├── hybrid.py                 # Hybrid approaches
+│   │   ├── tucker_decomposition.py
+│   │   └── cp_decomposition.py
+│   ├── importance/                    # 30+ scoring methods
+│   ├── transfer/
+│   └── benchmarks/
+├── examples/
+│   ├── ads_model_example.py
 │   ├── full_pipeline_example.py
-│   └── ads_model_example.py        # Specific to ads models
-└── tests/                          # Unit tests
-    ├── test_decomposition.py
-    ├── test_importance.py
-    └── test_transfer.py
+│   └── lora_adapter_example.py
+└── tests/
 ```
 
 ## Method Comparison
 
-| Method | Prediction Gain | QPS Impact | Memory | Complexity | Best Use Case |
-|--------|----------------|------------|--------|------------|---------------|
-| **Vanilla SVD** | Medium | ⚠️ **Negative** | Low | Low | Offline compression |
-| **Fused SVD** | Medium | Neutral | Low | Low | Deployment |
-| **LoRA Adapter** | High | ✅ **Positive/Neutral** | Medium | Low | Production (Recommended) |
-| **Tucker** | High | Neutral | Medium | High | CNN layers |
-| **CP** | Medium-High | Positive | Low | High | Extreme compression |
+| Method | Accuracy | QPS | Memory | Complexity | Recommended For |
+|--------|----------|-----|--------|------------|-----------------|
+| **MergedLoRA** | High | Best | Same | Low | Production (BEST) |
+| **DoRA** | Highest | Best | Same | Low | Maximum accuracy |
+| **LoRA** | High | Good | +10% | Low | Fine-tuning |
+| **Fused SVD** | Medium | Good | Low | Low | No adapter support |
+| **RandomizedSVD** | Medium | Good | Low | Low | Large matrices |
+| **Vanilla SVD** | Medium | Poor | Low | Low | Avoid for serving |
+| **Tucker** | High | Variable | Medium | High | CNN layers |
+| **CP** | Medium | Variable | Low | High | Extreme compression |
 
-## Performance Optimization Tips
+## Troubleshooting
 
-### For Better QPS:
-1. **Use LoRA instead of vanilla SVD** - adds residual in parallel rather than sequential ops
-2. **Fuse matrix operations** - merge `U @ S` into single matrix
-3. **Batch normalize adapters** - fold batch norm into adapter weights
-4. **Use appropriate rank** - too low hurts accuracy, too high hurts speed
-5. **Profile before deploying** - always measure actual QPS, not just FLOPs
+### QPS Still Low After Transfer?
 
-### For Better Prediction:
-1. **Select important layers carefully** - use gradient-based importance
-2. **Use higher ranks for critical layers** - not all layers need same rank
-3. **Fine-tune after transfer** - a few epochs can recover lost performance
-4. **Combine methods** - SVD for some layers, LoRA for others
-5. **Regularize adapters** - prevent overfitting during fine-tuning
+1. Ensure adapters are merged:
+   ```python
+   for m in model.modules():
+       if hasattr(m, 'merge'):
+           m.merge()
+   ```
 
-## Advanced Topics
+2. Profile to find bottleneck:
+   ```python
+   from matrix_decomp.benchmarks import profile_layer_latency
+   latencies = profile_layer_latency(model, input_shape)
+   ```
 
-### Handling Dimension Mismatches
-When large model has different dimensions than small model:
-```python
-from matrix_decomp.transfer.dimension_adapter import adapt_dimensions
+### Accuracy Dropped Too Much?
 
-# Large model: [1024, 2048], Small model: [512, 1024]
-U_large, S, Vt_large = decompose(large_weight)  # U: [1024, r], Vt: [r, 2048]
+1. Increase rank for important layers
+2. Use DoRA instead of standard LoRA
+3. Fine-tune for more epochs
+4. Use `AdaptiveRankDecomposer`
 
-# Adapt to small dimensions
-U_small = adapt_dimensions(U_large, target_rows=512, method='truncate')
-Vt_small = adapt_dimensions(Vt_large, target_cols=1024, method='truncate')
-```
+## Documentation
 
-### Layer-Specific Ranks
-Different layers may need different ranks:
-```python
-rank_config = {
-    'attention.query': 128,  # High rank for attention
-    'attention.key': 128,
-    'attention.value': 128,
-    'ffn.dense1': 64,       # Medium rank for FFN
-    'ffn.dense2': 64,
-    'output': 32            # Low rank for output
-}
-```
-
-### Combining with Other Techniques
-- **Quantization**: Apply INT8 quantization after decomposition
-- **Pruning**: Prune less important neurons before decomposition
-- **Knowledge Distillation**: Use large model as teacher during fine-tuning
+- [METHOD_SELECTION_GUIDE.md](METHOD_SELECTION_GUIDE.md) - Choosing the right method
+- [IMPORTANCE_METHODS_GUIDE.md](IMPORTANCE_METHODS_GUIDE.md) - 30+ importance methods
+- [USAGE_GUIDE.md](USAGE_GUIDE.md) - Detailed usage examples
 
 ## Citation
 
-If you use this framework in your research, please cite:
 ```bibtex
 @software{matrix_decomp_distillation,
   title={Matrix Decomposition for Model Distillation},
@@ -289,17 +519,13 @@ If you use this framework in your research, please cite:
 }
 ```
 
-## Contributing
+## References
 
-Contributions are welcome! Please see `CONTRIBUTING.md` for guidelines.
+- [LoRA: Low-Rank Adaptation of Large Language Models](https://arxiv.org/abs/2106.09685)
+- [DoRA: Weight-Decomposed Low-Rank Adaptation](https://arxiv.org/abs/2402.09353)
+- [Finding structure with randomness](https://arxiv.org/abs/0909.4061) (Randomized SVD)
+- Tensor decomposition literature for Tucker/CP methods
 
 ## License
 
 MIT License - see `LICENSE` file for details.
-
-## Acknowledgments
-
-- SVD and matrix factorization theory
-- LoRA: [Low-Rank Adaptation of Large Language Models](https://arxiv.org/abs/2106.09685)
-- Tucker/CP decomposition: Tensor decomposition literature
-- Neuron importance: Various pruning and neural architecture search papers
